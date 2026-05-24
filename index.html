@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Labirinto de Pedra 3D - IA Estratégica</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/nipplejs/0.10.1/nipplejs.min.js"></script>
+
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #f1f5f9; touch-action: none; font-family: 'Inter', sans-serif; }
+        canvas { display: block; }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; pointer-events: none; }
+        
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.9);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(14, 165, 233, 0.2);
+            border-radius: 16px;
+            pointer-events: auto;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.05);
+        }
+
+        #joystick-zone {
+            position: absolute;
+            bottom: 40px;
+            right: 40px;
+            width: 120px;
+            height: 120px;
+            pointer-events: auto;
+        }
+
+        /* Instruções mobile */
+        #controls-hint {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(0,0,0,0.4);
+            font-size: 12px;
+            font-weight: bold;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div class="flex justify-between p-6 w-full items-start">
+            <div class="glass-panel p-4 px-8 border-b-4 border-b-sky-500">
+                <p class="text-[10px] uppercase tracking-[0.2em] text-slate-400 font-bold mb-1">Exploração de Pedra</p>
+                <h1 class="text-4xl font-black text-slate-800 tabular-nums" id="score-display">0</h1>
+            </div>
+
+            <div class="flex flex-col gap-2 items-end">
+                <div id="status-tag" class="glass-panel px-4 py-2 text-[10px] font-bold uppercase text-amber-500">
+                    Aguardando Primeiro Passo
+                </div>
+                <div class="flex gap-2">
+                    <span class="glass-panel px-3 py-1 text-rose-500 font-bold text-[9px] uppercase tracking-tighter">Robô: Caçador</span>
+                    <span class="glass-panel px-3 py-1 text-indigo-500 font-bold text-[9px] uppercase tracking-tighter">Robô: Emboscada</span>
+                </div>
+            </div>
+        </div>
+
+        <div id="game-over" class="hidden absolute inset-0 flex items-center justify-center bg-white/60 backdrop-blur-xl pointer-events-auto">
+            <div class="glass-panel p-10 max-w-sm w-full text-center border-slate-200">
+                <h2 id="end-title" class="text-4xl font-black text-slate-800 mb-2 tracking-tighter italic uppercase">Não foi dessa vez</h2>
+                <div id="ai-death-comment" class="text-slate-500 mb-8 italic text-sm px-4"></div>
+                <div class="bg-slate-50 rounded-2xl p-6 mb-8 border border-slate-100">
+                    <p class="text-[10px] uppercase text-slate-400 font-bold mb-1">Unidades Percorridas</p>
+                    <p class="text-5xl font-black text-slate-800 tabular-nums" id="final-score">0</p>
+                </div>
+                <button onclick="restartGame()" class="w-full bg-sky-600 hover:bg-sky-700 text-white font-bold py-4 rounded-xl transition-all uppercase tracking-widest active:scale-95 shadow-lg shadow-sky-200">
+                    Tentar Novamente
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="controls-hint">Use WASD ou o Joystick para mover</div>
+    <div id="joystick-zone"></div>
+
+    <script>
+        const BLOCK_SIZE = 4;
+        const H = 4; 
+        const PLAYER_SPEED = 18;
+        const NPC_SPEED = 13;
+        const MAP_SIZE = 40;
+        let MAP = [];
+
+        let scene, camera, renderer, clock = new THREE.Clock();
+        let player, enemies = [];
+        let isDead = false, distance = 0;
+        let gameActive = false;
+
+        let isTerrorTheme = false;
+        let doorMesh = null;
+        let doorLight = null;
+        let playerFlashlight = null;
+        let walls = [];
+        let floorMesh = null;
+        let sunLight = null;
+        let ambientLight = null;
+        let gridMesh = null;
+        let doorIntervalId = null;
+
+        function generateProceduralMaze() {
+            MAP = [];
+            
+            // Preenche tudo com paredes criando a matriz do zero
+            for(let i=0; i<MAP_SIZE; i++) {
+                let row = [];
+                for(let j=0; j<MAP_SIZE; j++) { row.push(1); }
+                MAP.push(row);
+            }
+            
+            // Busca em Profundidade para criar caminhos contínuos
+            function carve(x, y) {
+                if (!MAP[y] || MAP[y][x] === undefined) return;
+                
+                MAP[y][x] = 0;
+                const dirs = [[0, -2], [0, 2], [-2, 0], [2, 0]].sort(() => Math.random() - 0.5);
+                
+                for(let d of dirs) {
+                    const nx = x + d[0];
+                    const ny = y + d[1];
+                    if (nx > 0 && nx < MAP_SIZE-1 && ny > 0 && ny < MAP_SIZE-1 && MAP[ny] && MAP[ny][nx] === 1) {
+                        const midY = y + d[1]/2;
+                        const midX = x + d[0]/2;
+                        if (MAP[midY]) MAP[midY][midX] = 0;
+                        carve(nx, ny);
+                    }
+                }
+            }
+            carve(1, 1);
+            
+            // Remove paredes extras para criar loops (evita caminhos únicos e permite fugas)
+            for(let i=0; i<MAP_SIZE * 3; i++) {
+                let rx = Math.floor(Math.random() * (MAP_SIZE - 2)) + 1;
+                let ry = Math.floor(Math.random() * (MAP_SIZE - 2)) + 1;
+                if (MAP[ry]) MAP[ry][rx] = 0;
+            }
+            
+            // Força pontos de nascimento abertos de forma segura
+            if (MAP[1]) { 
+                MAP[1][1] = 0; 
+                MAP[1][MAP_SIZE-2] = 0; 
+            }
+            if (MAP[MAP_SIZE-2]) {
+                MAP[MAP_SIZE-2][MAP_SIZE-2] = 0;
+            }
+        }
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0xf1f5f9);
+            camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 1500);
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            ambientLight = new THREE.AmbientLight(0xffffff, 0.85);
+            scene.add(ambientLight);
+            sunLight = new THREE.DirectionalLight(0xffffff, 0.55);
+            sunLight.position.set(20, 60, 20);
+            sunLight.castShadow = true;
+            scene.add(sunLight);
+
+            playerFlashlight = new THREE.SpotLight(0xffffff, 0, 80, Math.PI / 4, 0.5, 2);
+            playerFlashlight.position.set(0, 2, 0);
+            scene.add(playerFlashlight);
+            scene.add(playerFlashlight.target);
+
+            generateProceduralMaze();
+            createMazeMeshes();
+            spawnEntities();
+            setupInput();
+            
+            createDoor();
+            if (doorIntervalId) clearInterval(doorIntervalId);
+            doorIntervalId = setInterval(repositionDoor, 120000); // Muda a porta a cada 2 mins
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+
+            animate();
+        }
+
+        function createMazeMeshes() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 512; canvas.height = 512;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillRect(0, 0, 512, 512);
+            for(let i=0; i<1500; i++) {
+                ctx.fillStyle = `rgba(${50 + Math.random()*50}, ${50 + Math.random()*50}, ${60 + Math.random()*50}, ${0.1 + Math.random()*0.2})`;
+                ctx.fillRect(Math.random()*512, Math.random()*512, 2 + Math.random()*60, 2 + Math.random()*20);
+            }
+            const stoneTexture = new THREE.CanvasTexture(canvas);
+            
+            const wallGeo = new THREE.BoxGeometry(BLOCK_SIZE, H, BLOCK_SIZE);
+            const wallMat = new THREE.MeshStandardMaterial({ map: stoneTexture, roughness: 0.9, metalness: 0.05 });
+            const offset = (MAP_SIZE / 2) - 0.5;
+
+            for(let r=0; r<MAP_SIZE; r++) {
+                for(let c=0; c<MAP_SIZE; c++) {
+                    // Validação de segurança dupla antes de consultar a coluna
+                    if(MAP[r] && MAP[r][c] === 1) {
+                        const wall = new THREE.Mesh(wallGeo, wallMat);
+                        wall.position.set((c - offset) * BLOCK_SIZE, H/2, (r - offset) * BLOCK_SIZE);
+                        wall.receiveShadow = true; wall.castShadow = true;
+                        scene.add(wall);
+                        walls.push(wall);
+                    }
+                }
+            }
+
+            gridMesh = new THREE.GridHelper(800, 160, 0x0ea5e9, 0xe2e8f0);
+            gridMesh.position.y = 0.01;
+            scene.add(gridMesh);
+
+            floorMesh = new THREE.Mesh(new THREE.PlaneGeometry(1600, 1600), new THREE.MeshStandardMaterial({ color: 0xffffff }));
+            floorMesh.rotation.x = -Math.PI/2;
+            floorMesh.receiveShadow = true;
+            scene.add(floorMesh);
+        }
+
+        function createDoor() {
+            const doorGeo = new THREE.BoxGeometry(BLOCK_SIZE * 0.8, H, BLOCK_SIZE * 0.8);
+            const doorMat = new THREE.MeshStandardMaterial({ color: 0x00ff88, emissive: 0x005522, roughness: 0.2 });
+            doorMesh = new THREE.Mesh(doorGeo, doorMat);
+            
+            doorLight = new THREE.PointLight(0x00ff88, 1, 15);
+            doorLight.position.y = H/2;
+            doorMesh.add(doorLight);
+            
+            scene.add(doorMesh);
+            repositionDoor();
+        }
+
+        function repositionDoor() {
+            if(!doorMesh) return;
+            let r, c;
+            let attempts = 0;
+            do {
+                r = Math.floor(Math.random() * MAP_SIZE);
+                c = Math.floor(Math.random() * MAP_SIZE);
+                attempts++;
+            } while (MAP[r][c] !== 0 && attempts < 1000);
+
+            const offset = (MAP_SIZE / 2) - 0.5;
+            doorMesh.position.set((c - offset) * BLOCK_SIZE, H/2, (r - offset) * BLOCK_SIZE);
+        }
+
+        function checkTerrorTheme() {
+            const currentScore = Math.floor(distance / 10);
+            
+            // Ativa terror a partir de 1500 pontos de caminhada
+            if (currentScore >= 1500 && !isTerrorTheme) {
+                isTerrorTheme = true;
+                
+                scene.background = new THREE.Color(0x050000);
+                scene.fog = new THREE.FogExp2(0x050000, 0.08);
+                
+                ambientLight.color.setHex(0x110000);
+                ambientLight.intensity = 0.2;
+                sunLight.intensity = 0;
+                floorMesh.material.color.setHex(0x110505);
+                
+                if (gridMesh) gridMesh.visible = false;
+                walls.forEach(w => w.material.color.setHex(0x441111));
+                playerFlashlight.intensity = 1.5;
+                
+                const statusTag = document.getElementById('status-tag');
+                if (statusTag) {
+                    statusTag.innerText = "SOBREVIVA AO TERROR";
+                    statusTag.className = "glass-panel px-4 py-2 text-[10px] font-bold uppercase text-red-600";
+                }
+            } else if (currentScore < 1500 && isTerrorTheme) {
+                isTerrorTheme = false;
+                
+                scene.background = new THREE.Color(0xf1f5f9);
+                scene.fog = null;
+                
+                ambientLight.color.setHex(0xffffff);
+                ambientLight.intensity = 0.85;
+                sunLight.intensity = 0.55;
+                sunLight.color.setHex(0xffffff);
+                floorMesh.material.color.setHex(0xffffff);
+                
+                if (gridMesh) gridMesh.visible = true;
+                walls.forEach(w => w.material.color.setHex(0xffffff)); 
+                playerFlashlight.intensity = 0;
+                
+                const statusTag = document.getElementById('status-tag');
+                if (statusTag) {
+                    statusTag.innerText = "Explorando";
+                    statusTag.className = "glass-panel px-4 py-2 text-[10px] font-bold uppercase text-amber-500";
+                }
+            }
+            
+            // Lanterna segue direção do jogador
+            if (player && player.mesh && playerFlashlight) {
+                playerFlashlight.position.copy(player.mesh.position);
+                playerFlashlight.position.y = H / 2 + 1;
+                
+                const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(player.mesh.quaternion);
+                playerFlashlight.target.position.copy(player.mesh.position).add(forward.multiplyScalar(5));
+                playerFlashlight.target.updateMatrixWorld();
+            }
+        }
+
+        function createPlayerMesh() {
+            const group = new THREE.Group();
+            
+            // Corpo Soldado
+            const bodyGeo = new THREE.BoxGeometry(1.2, 1.8, 1.2);
+            const bodyMat = new THREE.MeshStandardMaterial({ color: 0x4ade80, roughness: 0.8 });
+            const body = new THREE.Mesh(bodyGeo, bodyMat);
+            body.position.y = 0.9;
+            body.castShadow = true;
+            group.add(body);
+
+            // Cabeça/Capacete
+            const headGeo = new THREE.BoxGeometry(0.8, 0.8, 0.8);
+            const headMat = new THREE.MeshStandardMaterial({ color: 0x166534, roughness: 0.6 });
+            const head = new THREE.Mesh(headGeo, headMat);
+            head.position.y = 2.2;
+            head.castShadow = true;
+            group.add(head);
+
+            // Visor
+            const visorGeo = new THREE.BoxGeometry(0.6, 0.2, 0.1);
+            const visorMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.2 });
+            const visor = new THREE.Mesh(visorGeo, visorMat);
+            visor.position.set(0, 2.2, 0.4);
+            group.add(visor);
+
+            // Arma
+            const gunGeo = new THREE.BoxGeometry(0.2, 0.2, 1.0);
+            const gunMat = new THREE.MeshStandardMaterial({ color: 0x334155 });
+            const gun = new THREE.Mesh(gunGeo, gunMat);
+            gun.position.set(0.6, 1.2, 0.4);
+            group.add(gun);
+
+            return group;
+        }
+
+        function createHunterMesh() {
+            const group = new THREE.Group();
+            
+            // Corpo Caçador
+            const bodyGeo = new THREE.CylinderGeometry(0.8, 0.8, 2.0, 16);
+            const bodyMat = new THREE.MeshStandardMaterial({ color: 0xef4444, metalness: 0.6 });
+            const body = new THREE.Mesh(bodyGeo, bodyMat);
+            body.position.y = 1.0;
+            body.castShadow = true;
+            group.add(body);
+
+            // Antena/Sensor
+            const antGeo = new THREE.CylinderGeometry(0.1, 0.1, 0.8);
+            const antMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8 });
+            const antena = new THREE.Mesh(antGeo, antMat);
+            antena.position.y = 2.4;
+            group.add(antena);
+
+            // Olho Vermelho
+            const eyeGeo = new THREE.SphereGeometry(0.3, 16, 16);
+            const eyeMat = new THREE.MeshStandardMaterial({ color: 0xff0000, emissive: 0xff0000 });
+            const eye = new THREE.Mesh(eyeGeo, eyeMat);
+            eye.position.set(0, 1.5, 0.7);
+            group.add(eye);
+
+            return group;
+        }
+
+        function createAmbushMesh() {
+            const group = new THREE.Group();
+            
+            // Corpo Emboscada
+            const bodyGeo = new THREE.BoxGeometry(1.4, 1.4, 1.4);
+            const bodyMat = new THREE.MeshStandardMaterial({ color: 0x6366f1, metalness: 0.4 });
+            const body = new THREE.Mesh(bodyGeo, bodyMat);
+            body.position.y = 0.7;
+            body.castShadow = true;
+            group.add(body);
+
+            // Esteiras
+            const trackGeo = new THREE.BoxGeometry(1.8, 0.4, 1.8);
+            const trackMat = new THREE.MeshStandardMaterial({ color: 0x1e293b });
+            const tracks = new THREE.Mesh(trackGeo, trackMat);
+            tracks.position.y = 0.2;
+            group.add(tracks);
+
+            // Nariz/Direcional
+            const noseGeo = new THREE.ConeGeometry(0.3, 0.8, 4);
+            const noseMat = new THREE.MeshStandardMaterial({ color: 0x4338ca });
+            const nose = new THREE.Mesh(noseGeo, noseMat);
+            nose.position.set(0, 1.0, 0.7);
+            nose.rotation.x = Math.PI / 2;
+            group.add(nose);
+
+            return group;
+        }
+
+        class Entity {
+            constructor(isPlayer, role = 'hunter') {
+                this.isPlayer = isPlayer;
+                this.role = role; 
+                this.speed = isPlayer ? PLAYER_SPEED : NPC_SPEED;
+                
+                if (isPlayer) {
+                    this.mesh = createPlayerMesh();
+                } else if (role === 'hunter') {
+                    this.mesh = createHunterMesh();
+                } else {
+                    this.mesh = createAmbushMesh();
+                }
+                
+                scene.add(this.mesh);
+                
+                this.dir = new THREE.Vector2(0,0);
+                this.targetPos = new THREE.Vector3();
+                this.path = [];
+                this.stuckTimer = 0;
+            }
+
+            setGridPos(c, r) {
+                if (r >= 0 && r < MAP_SIZE && c >= 0 && c < MAP_SIZE) MAP[r][c] = 0; // Garante q o spawn é vazio
+                const offset = (MAP_SIZE / 2) - 0.5;
+                this.mesh.position.set((c - offset) * BLOCK_SIZE, 0, (r - offset) * BLOCK_SIZE);
+                this.targetPos.copy(this.mesh.position);
+            }
+
+            update(dt) {
+                if (this.isPlayer) {
+                    if (this.dir.lengthSq() > 0.01) {
+                        // Rotação suave do Player
+                        const targetAngle = Math.atan2(this.dir.x, this.dir.y);
+                        
+                        let currentAngle = this.mesh.rotation.y;
+                        while (currentAngle <= -Math.PI) currentAngle += Math.PI * 2;
+                        while (currentAngle > Math.PI) currentAngle -= Math.PI * 2;
+                        
+                        let diff = targetAngle - currentAngle;
+                        while (diff < -Math.PI) diff += Math.PI * 2;
+                        while (diff > Math.PI) diff -= Math.PI * 2;
+
+                        this.mesh.rotation.y += diff * dt * 15;
+
+                        // Movimento do Player (com colisão)
+                        const moveSpeed = this.speed * dt;
+                        const nextX = this.mesh.position.x + this.dir.x * moveSpeed;
+                        const nextZ = this.mesh.position.z + this.dir.y * moveSpeed;
+                        
+                        if (!this.checkWallCollision(nextX, this.mesh.position.z)) {
+                            this.mesh.position.x = nextX;
+                        }
+                        if (!this.checkWallCollision(this.mesh.position.x, nextZ)) {
+                            this.mesh.position.z = nextZ;
+                        }
+
+                        // Pontuação por distância
+                        if (gameActive) {
+                            distance += moveSpeed;
+                            const scoreEl = document.getElementById('score-display');
+                            if (scoreEl) scoreEl.innerText = Math.floor(distance / 10);
+                        }
+                    }
+                } else {
+                    // IA do Inimigo
+                    if (!gameActive) return;
+
+                    if (this.mesh.position.distanceTo(this.targetPos) < 0.2) {
+                        this.planStrategy();
+                    } else {
+                        const moveDir = new THREE.Vector3().subVectors(this.targetPos, this.mesh.position).normalize();
+                        
+                        // Rotação do Inimigo
+                        const targetAngle = Math.atan2(moveDir.x, moveDir.z);
+                        let currentAngle = this.mesh.rotation.y;
+                        while (currentAngle <= -Math.PI) currentAngle += Math.PI * 2;
+                        while (currentAngle > Math.PI) currentAngle -= Math.PI * 2;
+                        let diff = targetAngle - currentAngle;
+                        while (diff < -Math.PI) diff += Math.PI * 2;
+                        while (diff > Math.PI) diff -= Math.PI * 2;
+                        this.mesh.rotation.y += diff * dt * 12;
+
+                        // Movimento
+                        this.mesh.position.add(moveDir.multiplyScalar(this.speed * dt));
+
+                        // Checa Game Over
+                        if (player && player.mesh.position.distanceTo(this.mesh.position) < 2.5) {
+                            gameOver(this.role);
+                        }
+                    }
+                }
+            }
+
+            checkWallCollision(nx, nz) {
+                const offset = (MAP_SIZE / 2) - 0.5;
+                const margin = 1.0; 
+                
+                const corners = [
+                    { x: nx + margin, z: nz + margin },
+                    { x: nx - margin, z: nz + margin },
+                    { x: nx + margin, z: nz - margin },
+                    { x: nx - margin, z: nz - margin }
+                ];
+
+                for (let c of corners) {
+                    const gridX = Math.round((c.x / BLOCK_SIZE) + offset);
+                    const gridZ = Math.round((c.z / BLOCK_SIZE) + offset);
+                    
+                    if (gridZ >= 0 && gridZ < MAP_SIZE && gridX >= 0 && gridX < MAP_SIZE) {
+                        if (MAP[gridZ][gridX] === 1) return true;
+                    } else {
+                        return true; 
+                    }
+                }
+                return false;
+            }
+
+            planStrategy() {
+                if (!player) return;
+                
+                const offset = (MAP_SIZE / 2) - 0.5;
+                let eGridX = Math.round((this.mesh.position.x / BLOCK_SIZE) + offset);
+                let eGridZ = Math.round((this.mesh.position.z / BLOCK_SIZE) + offset);
+                
+                let pGridX = Math.round((player.mesh.position.x / BLOCK_SIZE) + offset);
+                let pGridZ = Math.round((player.mesh.position.z / BLOCK_SIZE) + offset);
+                
+                eGridX = Math.max(0, Math.min(MAP_SIZE - 1, eGridX));
+                eGridZ = Math.max(0, Math.min(MAP_SIZE - 1, eGridZ));
+                pGridX = Math.max(0, Math.min(MAP_SIZE - 1, pGridX));
+                pGridZ = Math.max(0, Math.min(MAP_SIZE - 1, pGridZ));
+
+                // Desentalar caso a IA caia dentro de uma parede por margens
+                if (MAP[eGridZ][eGridX] === 1) {
+                    for (let r = -1; r <= 1; r++) {
+                        for (let c = -1; c <= 1; c++) {
+                            const nz = eGridZ + r;
+                            const nx = eGridX + c;
+                            if (nz >= 0 && nz < MAP_SIZE && nx >= 0 && nx < MAP_SIZE && MAP[nz][nx] === 0) {
+                                this.targetPos.set((nx - offset) * BLOCK_SIZE, 0, (nz - offset) * BLOCK_SIZE);
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                if (this.role === 'ambush') {
+                    // Tenta prever o alvo do player (Emboscada)
+                    if (player.dir.lengthSq() > 0) {
+                        pGridX += Math.round(player.dir.x * 6);
+                        pGridZ += Math.round(player.dir.y * 6);
+                        pGridX = Math.max(0, Math.min(MAP_SIZE - 1, pGridX));
+                        pGridZ = Math.max(0, Math.min(MAP_SIZE - 1, pGridZ));
+                        
+                        if (MAP[pGridZ][pGridX] === 1) {
+                            let nearestValid = null;
+                            let minDist = Infinity;
+                            for(let r=Math.max(0, pGridZ-4); r<=Math.min(MAP_SIZE-1, pGridZ+4); r++) {
+                                for(let c=Math.max(0, pGridX-4); c<=Math.min(MAP_SIZE-1, pGridX+4); c++) {
+                                    if(MAP[r][c] === 0) {
+                                        let dist = Math.abs(r - pGridZ) + Math.abs(c - pGridX);
+                                        if(dist < minDist) { minDist = dist; nearestValid = {r, c}; }
+                                    }
+                                }
+                            }
+                            if (nearestValid) { pGridZ = nearestValid.r; pGridX = nearestValid.c; }
+                        }
+                    }
+                }
+
+                const path = this.findPath(eGridX, eGridZ, pGridX, pGridZ);
+                
+                if (path && path.length > 1) {
+                    const nextNode = path[1]; 
+                    this.targetPos.set((nextNode.x - offset) * BLOCK_SIZE, 0, (nextNode.y - offset) * BLOCK_SIZE);
+                } else if (path && path.length === 1) {
+                    this.targetPos.copy(player.mesh.position);
+                } else {
+                    // Movimento de queda livre
+                    const dirs = [[0,1],[1,0],[0,-1],[-1,0]].sort(() => Math.random() - 0.5);
+                    for(let d of dirs) {
+                        let nx = eGridX + d[0], nz = eGridZ + d[1];
+                        if (nx >= 0 && nx < MAP_SIZE && nz >= 0 && nz < MAP_SIZE && MAP[nz][nx] === 0) {
+                            this.targetPos.set((nx - offset) * BLOCK_SIZE, 0, (nz - offset) * BLOCK_SIZE);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            findPath(startX, startY, targetX, targetY) {
+                const queue = [{x: startX, y: startY, path: [{x: startX, y: startY}]}];
+                const visited = new Set();
+                visited.add(`${startX},${startY}`);
+                
+                let iterations = 0;
+
+                while(queue.length > 0 && iterations < 3000) {
+                    iterations++;
+                    const current = queue.shift();
+                    
+                    if (current.x === targetX && current.y === targetY) return current.path;
+                    
+                    const dirs = [[0,1],[1,0],[0,-1],[-1,0]];
+                    for (let d of dirs) {
+                        const nx = current.x + d[0], ny = current.y + d[1];
+                        if (nx >= 0 && nx < MAP_SIZE && ny >= 0 && ny < MAP_SIZE) {
+                            if (MAP[ny][nx] === 0 && !visited.has(`${nx},${ny}`)) {
+                                visited.add(`${nx},${ny}`);
+                                queue.push({ x: nx, y: ny, path: [...current.path, {x: nx, y: ny}] });
+                            }
+                        }
+                    }
+                }
+                return null;
+            }
+        }
+
+        function spawnEntities() {
+            player = new Entity(true);
+            player.setGridPos(1, 1);
+            
+            const hunter = new Entity(false, 'hunter');
+            hunter.setGridPos(MAP_SIZE - 2, MAP_SIZE - 2);
+            
+            const ambush = new Entity(false, 'ambush');
+            ambush.setGridPos(MAP_SIZE - 2, 1);
+            
+            enemies = [hunter, ambush];
+        }
+
+        function setupInput() {
+            const keys = { w: false, a: false, s: false, d: false };
+            
+            window.addEventListener('keydown', (e) => {
+                const k = e.key.toLowerCase();
+                if(!gameActive && (k==='w'||k==='a'||k==='s'||k==='d')) { 
+                    gameActive = true; 
+                    document.getElementById('status-tag').innerText = 'Explorando'; 
+                }
+                if(k in keys) keys[k] = true;
+                updateDir();
+            });
+            window.addEventListener('keyup', (e) => {
+                const k = e.key.toLowerCase();
+                if(k in keys) keys[k] = false;
+                updateDir();
+            });
+
+            function updateDir() {
+                if(!player) return;
+                player.dir.set(0, 0);
+                if (keys.w) player.dir.y = -1;
+                if (keys.s) player.dir.y = 1;
+                if (keys.a) player.dir.x = -1;
+                if (keys.d) player.dir.x = 1;
+                
+                if (player.dir.lengthSq() > 0) player.dir.normalize();
+            }
+
+            const joysticks = nipplejs.create({
+                zone: document.getElementById('joystick-zone'),
+                mode: 'static',
+                position: { left: '50%', top: '50%' },
+                color: '#38bdf8'
+            });
+
+            joysticks.on('move', (evt, data) => {
+                if(!gameActive) { gameActive = true; document.getElementById('status-tag').innerText = 'Explorando'; }
+                if(player) {
+                    player.dir.x = Math.cos(data.angle.radian);
+                    player.dir.y = -Math.sin(data.angle.radian);
+                }
+            });
+            joysticks.on('end', () => { if(player) player.dir.set(0,0); });
+        }
+
+        function gameOver(role) {
+            if (isDead) return;
+            gameActive = false;
+            isDead = true;
+            
+            const goScreen = document.getElementById('game-over');
+            goScreen.classList.remove('hidden');
+            document.getElementById('final-score').innerText = Math.floor(distance / 10);
+            
+            const comment = document.getElementById('ai-death-comment');
+            const title = document.getElementById('end-title');
+
+            if (role === 'escaped') {
+                title.innerText = "VOCÊ ESCAPOU!";
+                title.className = "text-4xl font-black text-emerald-600 mb-2 tracking-tighter italic uppercase";
+                comment.innerText = "Parabéns, você encontrou a saída antes de ser pego!";
+            } else {
+                title.innerText = "NÃO FOI DESSA VEZ";
+                title.className = "text-4xl font-black text-slate-800 mb-2 tracking-tighter italic uppercase";
+                if (role === 'hunter') comment.innerText = "Você foi pego pelo Caçador implacável!";
+                else comment.innerText = "Você caiu perfeitamente em uma emboscada!";
+            }
+        }
+
+        function restartGame() {
+            isDead = false;
+            gameActive = false;
+            distance = 0;
+            document.getElementById('score-display').innerText = "0";
+            document.getElementById('game-over').classList.add('hidden');
+            
+            const st = document.getElementById('status-tag');
+            st.innerText = "Aguardando Primeiro Passo";
+            st.className = "glass-panel px-4 py-2 text-[10px] font-bold uppercase text-amber-500";
+            
+            isTerrorTheme = true; // force toggle
+            checkTerrorTheme(); // reset to normal
+            
+            scene.remove(player.mesh);
+            enemies.forEach(e => scene.remove(e.mesh));
+            
+            spawnEntities();
+            repositionDoor();
+            
+            if (doorIntervalId) clearInterval(doorIntervalId);
+            doorIntervalId = setInterval(repositionDoor, 120000);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const dt = Math.min(clock.getDelta(), 0.1); 
+            
+            if (player) {
+                player.update(dt);
+                // Câmera segue o jogador
+                const offset = new THREE.Vector3(0, 35, 25); // Aumentamos a altura (Y) e a distância (Z)
+                camera.position.lerp(player.mesh.position.clone().add(offset), 0.1);
+                camera.lookAt(player.mesh.position);
+
+                // Checa fuga na porta
+                if(doorMesh && player.mesh.position.distanceTo(doorMesh.position) < BLOCK_SIZE) {
+                    gameOver('escaped');
+                }
+            }
+            
+            if (gameActive && !isDead) {
+                enemies.forEach(e => e.update(dt));
+                checkTerrorTheme();
+            }
+            
+            renderer.render(scene, camera);
+        }
+
+        window.onload = init;
+    </script>
+</body>
+</html>
